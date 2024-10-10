@@ -15,7 +15,6 @@ class Model(BaseModule):
         self.caption_vocab_size = caption_vocab_size
         self.comment_vocab_size = comment_vocab_size
         self.hidden_size = hidden_size
-        self.ft_hidden_size = 2*hidden_size + 2*hidden_size + 8192
 
         self.caption_embed = nn.Embedding(
             caption_vocab_size, embedding_dim=hidden_size,
@@ -28,14 +27,16 @@ class Model(BaseModule):
         self.caption_encoder = nn.LSTM(
             input_size=hidden_size,
             hidden_size=hidden_size,
-            num_layers=1,
+            num_layers=2,
+            dropout=0.3,
             batch_first=True,
             bidirectional=True
         )
         self.comment_encoder = nn.LSTM(
             input_size=hidden_size,
             hidden_size=hidden_size,
-            num_layers=1,
+            num_layers=2,
+            dropout=0.3,
             batch_first=True,
             bidirectional=True
         )
@@ -54,9 +55,10 @@ class Model(BaseModule):
             nn.MaxPool2d(3),
             nn.Flatten()
         )
+        self.ft_hidden_size = self.caption_encoder.num_layers*2*hidden_size + self.comment_encoder.num_layers*hidden_size + 8192
         self.fc = nn.Sequential(
             nn.Dropout(0.5),
-            nn.Linear(in_features=self.ft_hidden_size, out_features=1024),
+            nn.Linear(in_features=14336, out_features=1024),
             nn.ReLU(),
             nn.BatchNorm1d(1024),
             nn.Dropout(0.3),
@@ -78,7 +80,7 @@ class Model(BaseModule):
         )
         _, (caption, _) = self.caption_encoder(caption)
         del _
-        caption = caption.transpose_(0, 1)[:, -2:,].flatten(start_dim=-2)
+        caption = caption.transpose_(0, 1).flatten(start_dim=-2)
 
         # Encoding comment
         comment = self.caption_embed(comment)
@@ -90,7 +92,7 @@ class Model(BaseModule):
         )
         _, (comment, _) = self.caption_encoder(comment)
         del _
-        comment = comment.transpose_(0, 1)[:, -2:,].flatten(start_dim=-2)
+        comment = comment.transpose_(0, 1).flatten(start_dim=-2)
 
         # Encoding image
         image = self.image_encoder(image)

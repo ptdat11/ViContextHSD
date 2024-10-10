@@ -36,17 +36,16 @@ def read_ViContextHSD(dir: str):
 class ViContextHSD(Dataset):
     def __init__(
             self, part: Literal["train", "dev", "test"],
-            caption_tokenizer,
-            comment_tokenizer,
-            img_transform = None) -> None:
+            img_transform = None,
+            label2idx: dict[str, int] = {'Clean': 0, 'Offensive': 1, 'Hate': 2}) -> None:
         super().__init__()
         self.part = part
         self.dir = Path(f"data/{part}")
         self.img_transform = img_transform
-        self.caption_tokenizer = caption_tokenizer
-        self.comment_tokenizer = comment_tokenizer
+        self.label2idx = label2idx
 
         self.df = read_ViContextHSD(self.dir)
+        self.df['label'] = self.df['label'].map(label2idx)
 
     def __len__(self):
         return self.df.shape[0]
@@ -56,12 +55,10 @@ class ViContextHSD(Dataset):
         image_name = self.df.loc[index, "image"]
         comment = self.df.loc[index, "comment"]
         label = self.df.loc[index, "label"]
-
-        caption = self.caption_tokenizer.encode(caption)
         image = read_image(self.dir / "imgs" / image_name, mode=ImageReadMode.RGB)
         if self.img_transform is not None:
             image = self.img_transform(image)
-        comment = self.comment_tokenizer.encode(comment)
+
 
         return {
             "caption": caption,
@@ -71,29 +68,29 @@ class ViContextHSD(Dataset):
         }
 
 
-def collate_fn(items):
-    captions, comment, images, labels = [], [], [], []
-    for item in items:
-        captions.append(item['caption'])
-        comments.append(item['comment'])
-        images.append(item['image'])
-        labels.append(item['label'])
+# def collate_fn(items):
+#     captions, comment, images, labels = [], [], [], []
+#     for item in items:
+#         captions.append(item['caption'])
+#         comments.append(item['comment'])
+#         images.append(item['image'])
+#         labels.append(item['label'])
 
-    caption = pad_sequence(captions, batch_first=True)
-    comment = pad_sequence(comments, batch_first=True)
-    image = torch.stack(images)
-    label = torch.cat(labels)
+#     caption = pad_sequence(captions, batch_first=True)
+#     comment = pad_sequence(comments, batch_first=True)
+#     image = torch.stack(images)
+#     label = torch.cat(labels)
 
-    caption_attention_mask = (caption != 0).bool()
-    comment_attention_mask = (comment != 0).bool()
+#     caption_attention_mask = (caption != 0).bool()
+#     comment_attention_mask = (comment != 0).bool()
 
-    return {
-        'caption': caption,
-        'image': image,
-        'comment': comment,
-        'caption_attention_mask': caption_attention_mask,
-        'comment_attention_mask': comment_attention_mask
-    }
+#     return {
+#         'caption': caption,
+#         'image': image,
+#         'comment': comment,
+#         'caption_attention_mask': caption_attention_mask,
+#         'comment_attention_mask': comment_attention_mask
+#     }
 
 
 def train_val_split(
@@ -111,5 +108,7 @@ def train_val_split(
 
     return {
         'train_set': Subset(dataset, train_idx),
-        'val_set': Subset(dataset, val_idx)
+        'val_set': Subset(dataset, val_idx),
+        'train_idx': train_idx,
+        'val_idx': val_idx
     }
