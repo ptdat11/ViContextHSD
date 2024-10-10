@@ -9,8 +9,9 @@ class BaseModule(nn.Module, ABC):
         super().__init__(*args, **kwargs)
 
     def forward(
-        self, caption: torch.Tensor, image: torch.Tensor,
-        comment: torch.Tensor) -> torch.Tensor:
+        self,
+        caption: torch.Tensor, image: torch.Tensor, comment: torch.Tensor,
+        caption_attention_mask: torch.Tensor, comment_attention_mask: torch.Tensor) -> torch.Tensor:
         pass
 
     def use_checkpointing(self):
