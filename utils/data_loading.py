@@ -1,7 +1,6 @@
 import torch
 from torch.utils.data import Dataset, Subset
 from torchvision.io import read_image, ImageReadMode
-from torch.nn.utils.rnn import pad_sequence
 
 import re
 from sklearn.model_selection import StratifiedGroupKFold
@@ -9,8 +8,6 @@ from pathlib import Path
 from pandas import DataFrame
 from json import load
 from typing import Literal
-
-from transformers import image_transforms
 
 def read_ViContextHSD(dir: str):
     dir = Path(dir)
@@ -35,11 +32,14 @@ def read_ViContextHSD(dir: str):
 
 class ViContextHSD(Dataset):
     def __init__(
-            self, part: Literal["train", "dev", "test"],
+            self, 
+            part: Literal["train", "dev", "test"],
+            ablation: Literal['caption', 'image', 'context', 'none'] = 'none',
             img_transform = None,
             label2idx: dict[str, int] = {'Clean': 0, 'Offensive': 1, 'Hate': 2}) -> None:
         super().__init__()
         self.part = part
+        self.ablation = ablation
         self.dir = Path(f"data/{part}")
         self.img_transform = img_transform
         self.label2idx = label2idx
@@ -51,60 +51,57 @@ class ViContextHSD(Dataset):
         return self.df.shape[0]
 
     def __getitem__(self, index: int):
-        caption = self.df.loc[index, "caption"]
-        image_name = self.df.loc[index, "image"]
-        comment = self.df.loc[index, "comment"]
-        label = self.df.loc[index, "label"]
-        image = read_image(self.dir / "imgs" / image_name, mode=ImageReadMode.RGB)
-        if self.img_transform is not None:
-            image = self.img_transform(image)
+        sample = {}
+
+        # If caption is not ablated
+        if self.ablation not in ['caption', 'context']:
+            caption = self.df.loc[index, 'caption']
+            sample['caption'] = caption
+
+        # If image is not ablated
+        if self.ablation not in ['image', 'context']:
+            image_name = self.df.loc[index, 'image']
+            image = read_image(self.dir / 'imgs' / image_name, mode=ImageReadMode.RGB)
+            if self.img_transform is not None:
+                image = self.img_transform(image)
+            sample['image'] = image
+        
+        comment = self.df.loc[index, 'comment']
+        label = self.df.loc[index, 'label']
+
+        sample['comment'] = comment
+        sample['label'] = label
+
+        return sample
 
 
-        return {
-            "caption": caption,
-            "image": image,
-            "comment": comment,
-            "label": label
-        }
-
-
-# def collate_fn(items):
-#     captions, comment, images, labels = [], [], [], []
-#     for item in items:
-#         captions.append(item['caption'])
-#         comments.append(item['comment'])
-#         images.append(item['image'])
-#         labels.append(item['label'])
-
-#     caption = pad_sequence(captions, batch_first=True)
-#     comment = pad_sequence(comments, batch_first=True)
-#     image = torch.stack(images)
-#     label = torch.cat(labels)
-
-#     caption_attention_mask = (caption != 0).bool()
-#     comment_attention_mask = (comment != 0).bool()
-
-#     return {
-#         'caption': caption,
-#         'image': image,
-#         'comment': comment,
-#         'caption_attention_mask': caption_attention_mask,
-#         'comment_attention_mask': comment_attention_mask
-#     }
-
+def collate_fn(samples: dict):
+    captions, images, comments, labels = [], [], [], []
+    for sample in samples:
+        captions.append(sample.get('caption', None))
+        images.append(sample.get('image', None))
+        comments.append(sample['comment'])
+        labels.append(sample['label'])
+    
+    batch = {
+        'caption': None if any(caption is None for caption in captions) else captions,
+        'image': None if any(image is None for image in images) else torch.stack(images),
+        'comment': comments,
+        'label': torch.tensor(labels)
+    }
+    return batch
 
 def train_val_split(
         dataset: ViContextHSD,
         val_percent: float,
         random_state: int | None = None):
     n_folds = round(1 / val_percent)
-    labels, groups = [], []
-    for row in dataset.df.itertuples():
-        labels.append(row.label)
-        groups.append(re.search(r'^\d+', row.image).group(0))
 
     kfold = StratifiedGroupKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
-    train_idx, val_idx = next(kfold.split(range(dataset.df.shape[0]), y=labels, groups=groups))
+    train_idx, val_idx = next(kfold.split(
+            range(dataset.df.shape[0]),
+            y=dataset.df['label'],
+            groups=dataset.df['image'].map(lambda i: re.search(r'^\d+', i).group(0))))
 
     return {
         'train_set': Subset(dataset, train_idx),

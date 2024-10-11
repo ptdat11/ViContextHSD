@@ -1,17 +1,14 @@
 import torch
-import torch.nn as nn
 import torch.amp
 from torch.utils.data import DataLoader
 from torchsummary import summary
+import config
 from utils.tokenizer import WhiteSpaceTokenizer
-from utils.data_loading import ViContextHSD, train_val_split
+from utils.data_loading import ViContextHSD, train_val_split, collate_fn
 from torchvision.transforms import v2
-from torch.utils.data import Dataset
-import models
 from utils.evaluate import evaluate
 from sklearn.utils import compute_class_weight
 
-from numpy import arange
 from importlib import import_module
 import os
 import argparse
@@ -23,6 +20,7 @@ from typing import Literal
 def train(
     model_name: str,
     device: torch.device,
+    ablate: Literal['caption', 'image', 'context', 'none'] = 'none',
     epochs: int = 5,
     batch_size: int = 32,
     learning_rate: float = 1e-3,
@@ -36,8 +34,6 @@ def train(
 ):
     dir_checkpoint = Path("./checkpoints/") / model_name
 
-    caption_tokenizer = WhiteSpaceTokenizer()
-    comment_tokenizer = WhiteSpaceTokenizer()
     img_transform = v2.Compose([
         v2.ToDtype(torch.float32),
         v2.Resize((224, 224)),
@@ -46,9 +42,9 @@ def train(
 
     logging.info("Loading datasets...")
     dataset = ViContextHSD(
-        part="train",
-        img_transform=img_transform
-    )
+            part="train",
+            ablation=ablate,
+            img_transform=img_transform)
     # Build train and dev sets
     split = train_val_split(dataset, val_percent=val_percent)
     train_set, val_set = split['train_set'], split['val_set']
@@ -57,24 +53,19 @@ def train(
     n_val = len(val_set)
 
     logging.info("Building tokenizer")
-    caption_tokenizer.build_from_texts(train_set.dataset.df.loc[split['train_idx'], 'caption'])
-    comment_tokenizer.build_from_texts(train_set.dataset.df.loc[split['train_idx'], 'comment'])
-
-    # Create data loaders
-    loader_args = dict(batch_size=batch_size, num_workers=os.cpu_count(), pin_memory=True)
-    train_loader = DataLoader(train_set, shuffle=True, **loader_args)
-    val_loader = DataLoader(val_set, shuffle=False, **loader_args)
-
+    tokenizer = WhiteSpaceTokenizer()
+    tokenizer.build_from_texts(train_set.dataset.df.loc[split['train_idx'], ['caption', 'comment']].values.ravel())
 
     model = import_module(f"models.{model_name}").Model(
-        caption_vocab_size=len(caption_tokenizer),
-        comment_vocab_size=len(comment_tokenizer),
-        hidden_size=768)
-    # if resume is not None:
-    #     state_dict = torch.load(resume, weights_only=False)
-    #     model.load_state_dict(state_dict)
+        ablation=ablate,
+        **config.HYPERPARAMS[model_name])
     model.to(device)
     summary(model)
+
+    # Create data loaders
+    loader_args = dict(batch_size=batch_size, num_workers=os.cpu_count(), pin_memory=True, collate_fn=collate_fn)
+    train_loader = DataLoader(train_set, shuffle=True, **loader_args)
+    val_loader = DataLoader(val_set, shuffle=False, **loader_args)
 
     cls_weight = torch.from_numpy(compute_class_weight(
                 "balanced",
@@ -83,8 +74,10 @@ def train(
             else None
 
     logging.info(f'''Starting training:
-        Train samples:        {n_train}
-        Validation samples:   {n_val}
+        Vocab size:             {len(tokenizer)}
+        Ablation:               {ablate}
+        Train size:             {n_train}
+        Validation size:        {n_val}
         Epochs:                 {epochs}
         Batch size:             {batch_size}
         Learning rate:          {learning_rate}
@@ -109,14 +102,15 @@ def train(
         with tqdm(total=n_train, desc=f"Epoch {epoch}/{epochs}", unit="comment") as pbar:
             for i_batch, batch in enumerate(train_loader):
                 caption, image, comment, label = batch['caption'], batch['image'], batch['comment'], batch['label']
-                caption_input = caption_tokenizer(caption)
-                comment_input = comment_tokenizer(comment)
+
+                caption_input = tokenizer(caption) if caption is not None else None
+                comment_input = tokenizer(comment)
 
                 input = {
-                    'caption': caption_input['input_ids'].to(device),
-                    'image': image.to(device),
+                    'caption': caption_input['input_ids'].to(device) if caption is not None else None,
+                    'caption_attention_mask': caption_input['attention_mask'].to(device) if caption is not None else None,
+                    'image': image.to(device) if image is not None else None,
                     'comment': comment_input['input_ids'].to(device),
-                    'caption_attention_mask': caption_input['attention_mask'].to(device),
                     'comment_attention_mask': comment_input['attention_mask'].to(device),
                 }
                 label = label.to(device)
@@ -132,18 +126,17 @@ def train(
                     grad_scaler.step(optimizer)
                     grad_scaler.update()
 
-                pbar.update(image.size(0))
+                pbar.update(len(comment))
                 pbar.set_postfix(**{'loss (batch)': f"{loss.item():.4f}"})
 
         # Evaluation round
         evals = evaluate(model=model,
                           dataloader=val_loader,
-                          caption_tokenizer=caption_tokenizer,
-                          comment_tokenizer=comment_tokenizer,
+                          tokenizer=tokenizer,
                           device=device,
                           amp=amp)
         for name, eval in evals.items():
-            print(name)
+            print(f'\n{name}')
             print(eval)
 
         if save_checkpoint:
@@ -152,20 +145,36 @@ def train(
             torch.save(state_dict, str(dir_checkpoint / f"epoch{epoch}.pth"))
             logging.info(f"Checkpoint {epoch} saved")
 
-    return model
+    return {
+        'model': model,
+        'tokenizer': tokenizer
+    }
 
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', '-m', metavar='M', type=str, help='Model type', required=True)
-    parser.add_argument('--epochs', '-e', metavar='E', type=int, default=5, help='Number of epochs')
-    parser.add_argument('--batch-size', '-b', dest='batch_size', metavar='B', type=int, default=32, help='Batch size')
-    parser.add_argument('--learning-rate', '-lr', metavar='LR', type=float, default=1e-3, help='Learning rate', dest='lr')
-    parser.add_argument('--weight-decay', '-w', metavar='WD', type=float, default=0, help='Weight decay', dest='wd')
-    parser.add_argument('--grad-accum', '-ga', metavar='GA', type=int, default=1, help='Number of gradient accumulation over batches', dest='grad_accum')
-    parser.add_argument('--amp', action='store_true', default=False, help='Use mixed precision')
-    parser.add_argument('--cls-weight', '-cw', dest='cls_weight', default=False, action='store_true', help='Apply balanced class weight')
-    parser.add_argument('--resume', default=None, type=str, help='Resume checkpointed model')
+    parser.add_argument('--model', '-m', metavar='M', 
+                        help='Model option', required=True)
+    parser.add_argument('--ablate', '-abl', metavar='ABL', default='none', 
+                        help='Ablate specific modality', choices=['caption', 'image', 'context', 'none'])
+    parser.add_argument('--epochs', '-e', metavar='E', default=5, 
+                        type=int, help='Number of epochs')
+    parser.add_argument('--batch-size', '-b', metavar='B', default=32,
+                        type=int, help='Batch size', dest='batch_size')
+    parser.add_argument('--learning-rate', '-lr', metavar='LR', default=1e-3, 
+                        type=float, help='Learning rate', dest='lr')
+    parser.add_argument('--val-percent', '-val', metavar='VAL', default=0.1, 
+                        type=float, help='Validation sampled from training set', dest='val_percent')
+    parser.add_argument('--weight-decay', '-w', metavar='WD', default=0, 
+                        type=float, help='Weight decay', dest='wd')
+    parser.add_argument('--grad-accum', '-ga', metavar='GA', default=1, 
+                        type=int, help='Number of gradient accumulation over batches', dest='grad_accum')
+    parser.add_argument('--amp', default=False, 
+                        action='store_true', help='Use mixed precision')
+    parser.add_argument('--cls-weight', '-cw', default=False,
+                        action='store_true', help='Apply balanced class weight', dest='cls_weight')
+    parser.add_argument('--resume', default=None, 
+                        help='Resume checkpointed model')
 
     return parser.parse_args()
 
@@ -178,10 +187,12 @@ if __name__ == "__main__":
 
     model = train(
         model_name=args.model,
+        ablate=args.ablate,
         device=device,
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.lr,
+        val_percent=args.val_percent,
         grad_accum=args.grad_accum,
         save_checkpoint=True,
         amp=args.amp,
