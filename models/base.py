@@ -5,19 +5,21 @@ from torch.utils.checkpoint import checkpoint
 from abc import ABC
 from typing import Literal
 
-class BaseModule(nn.Module, ABC):
-    def __init__(self, ablation: Literal['caption', 'image', 'context', None], *args, **kwargs) -> None:
+class BaseModel(nn.Module, ABC):
+    def __init__(
+            self, 
+            ablation: Literal['caption', 'image', 'context', None], 
+            *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.ablation = ablation
 
     def forward(
-        self,
-        comment: torch.Tensor,
-        comment_attention_mask: torch.Tensor,
-        caption: torch.Tensor | None = None,
-        image: torch.Tensor | None = None,
-        caption_attention_mask: torch.Tensor | None = None
-    ) -> torch.Tensor:
+            self,
+            comment: torch.Tensor,
+            comment_attention_mask: torch.Tensor,
+            caption: torch.Tensor | None = None,
+            image: torch.Tensor | None = None,
+            caption_attention_mask: torch.Tensor | None = None) -> torch.Tensor:
         if self.ablation == 'caption':
             return self.forward_caption_ablation(
                 image=image,

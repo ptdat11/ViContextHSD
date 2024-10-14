@@ -66,7 +66,7 @@ def evaluate(
     }).T * 100
 
     scores.rename(columns={0: 'Clean', 1: 'Offensive', 2: 'Hate'}, inplace=True)
-    scores['macro-avg'] = scores.mean(axis=1)
+    scores['Macro-avg'] = scores.mean(axis=1)
 
     conf_mat = DataFrame(
         conf_matrix.compute().cpu().numpy(),

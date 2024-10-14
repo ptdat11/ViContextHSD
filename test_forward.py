@@ -1,7 +1,7 @@
 import torch
 from torch.utils.data import DataLoader
 from utils.data_loading import ViContextHSD, collate_fn
-from utils.tokenizer import WhiteSpaceTokenizer
+from tokenizer import WhitespaceTokenizer
 from torchsummary import summary
 from torchvision.io import read_image
 from torchvision.transforms import v2
@@ -19,8 +19,7 @@ if __name__ == "__main__":
     args = get_args()
 
     dset = ViContextHSD('train')
-    caption_tokenizer = WhiteSpaceTokenizer().build_from_texts(dset.df['caption'])
-    commment_tokenizer = WhiteSpaceTokenizer().build_from_texts(dset.df['comment'])
+    tokenizer = WhitespaceTokenizer().build_from_texts(dset.df['comment'].tolist() + dset.df['caption'].tolist())
     image_transformer = v2.Compose([
         v2.ToDtype(torch.float32),
         v2.Resize((224, 224)),
@@ -28,16 +27,15 @@ if __name__ == "__main__":
     ])
 
     model = import_module(f'models.{args.model}').Model(
-        caption_vocab_size=len(caption_tokenizer),
-        comment_vocab_size=len(commment_tokenizer),
+        ocab_size=len(tokenizer),
         hidden_size=512
     )
     model.cuda()
     summary(model)
 
     samples = dset.df.sample(args.batch_size)
-    caption_input = caption_tokenizer(samples['caption'])
-    comment_input = commment_tokenizer(samples['comment'])
+    caption_input = tokenizer(samples['caption'])
+    comment_input = tokenizer(samples['comment'])
     image_input = torch.stack([
         image_transformer(read_image(dset.dir / 'imgs' / img_path))
         for img_path in samples['image']

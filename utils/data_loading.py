@@ -35,6 +35,7 @@ class ViContextHSD(Dataset):
             self, 
             part: Literal["train", "dev", "test"],
             ablation: Literal['caption', 'image', 'context', 'none'] = 'none',
+            text_preprocessing = lambda text: text,
             img_transform = None,
             label2idx: dict[str, int] = {'Clean': 0, 'Offensive': 1, 'Hate': 2}) -> None:
         super().__init__()
@@ -45,6 +46,8 @@ class ViContextHSD(Dataset):
         self.label2idx = label2idx
 
         self.df = read_ViContextHSD(self.dir)
+        self.df['caption'] = self.df['caption'].map(text_preprocessing)
+        self.df['comment'] = self.df['comment'].map(text_preprocessing)
         self.df['label'] = self.df['label'].map(label2idx)
 
     def __len__(self):
