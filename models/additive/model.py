@@ -4,18 +4,23 @@ from torch.nn.utils.rnn import pack_padded_sequence
 from ..base import BaseModel
 
 class Model(BaseModel):
-    model_name = 'baseline'
+    model_name = 'additive'
 
     def __init__(
 			self, 
 			vocab_size: int,
 			hidden_size: int = 768,
 			bn_momentum: float = 0.5,
+            lstm_num_layers: int = 2,
+            fc_hidden_size: int = 1024,
         	*args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
-        self.ft_hidden_size = 0
+        self.bn_momentum = bn_momentum
+        self.lstm_num_layers = lstm_num_layers
+        self.fc_hidden_size = fc_hidden_size
+        self.feature_size = 0
 
         self.embed = nn.Embedding(
                 vocab_size, 
@@ -24,21 +29,21 @@ class Model(BaseModel):
         self.comment_encoder = nn.LSTM(
                 input_size=hidden_size,
                 hidden_size=hidden_size,
-                num_layers=2,
+                num_layers=lstm_num_layers,
                 dropout=0.3,
                 batch_first=True,
                 bidirectional=True)
-        self.ft_hidden_size += int(self.comment_encoder.num_layers*2*hidden_size)
+        self.feature_size += int(self.comment_encoder.num_layers*2*hidden_size)
 
         if self.ablation not in ['caption', 'context']:
             self.caption_encoder = nn.LSTM(
                     input_size=hidden_size,
                     hidden_size=hidden_size,
-                    num_layers=2,
+                    num_layers=lstm_num_layers,
                     dropout=0.3,
                     batch_first=True,
                     bidirectional=True)
-            self.ft_hidden_size += int(self.caption_encoder.num_layers*2*hidden_size)
+            self.feature_size += int(self.caption_encoder.num_layers*2*hidden_size)
 
         if self.ablation not in ['image', 'context']:
             self.image_encoder = nn.Sequential(
@@ -55,15 +60,27 @@ class Model(BaseModel):
                     nn.ReLU(),
                     nn.MaxPool2d(2),
                     nn.Flatten())
-            self.ft_hidden_size += int(64*(224/2/2/2)**2)
+            self.feature_size += int(64*(224/2/2/2)**2)
 
         self.fc = nn.Sequential(
                 nn.Dropout(0.5),
-                nn.Linear(in_features=self.ft_hidden_size, out_features=1024),
-                nn.ReLU(),
-                nn.BatchNorm1d(1024),
+                nn.Linear(in_features=self.feature_size, out_features=fc_hidden_size),
+                nn.GELU(),
+                nn.BatchNorm1d(fc_hidden_size),
                 nn.Dropout(0.3),
-                nn.Linear(in_features=1024, out_features=3))
+                nn.Linear(in_features=fc_hidden_size, out_features=3))
+
+    @property
+    def hyperparams(self):
+        return {
+            'name': Model.model_name,
+            'ablation': self.ablation,
+            'vocab_size': self.vocab_size,
+            'hidden_size': self.hidden_size,
+            'bn_momentum': self.bn_momentum,
+            'lstm_num_layers': self.lstm_num_layers,
+            'fc_hidden_size': self.fc_hidden_size
+        }
 
 
     def forward_no_ablation(

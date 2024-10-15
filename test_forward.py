@@ -1,58 +1,69 @@
 import torch
 from torch.utils.data import DataLoader
 from utils.data_loading import ViContextHSD, collate_fn
-from tokenizer import WhitespaceTokenizer
+from utils.utils import process_batch
 from torchsummary import summary
-from torchvision.io import read_image
-from torchvision.transforms import v2
+import config
 
 import argparse
 from importlib import import_module
 
 def get_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', '-m', metavar='M', type=str, help='Model option', required=True)
-    parser.add_argument('--batch-size', '-b', metavar='B', type=int, default=32, help='Batch size', dest='batch_size')
+    parser.add_argument('--model', '-m', metavar='M', 
+                        help='Model option', required=True)
+    parser.add_argument('--tokenizer', '-tkn', metavar='TKN',
+                        help='Tokenizer option', required=True)
+    parser.add_argument('--batch-size', '-b', metavar='B', default=32, 
+                        type=int, help='Batch size', dest='batch_size')
+    parser.add_argument('--ablate', '-abl', metavar='ABL', default='none', 
+                        help='Ablate specific modality', choices=['caption', 'image', 'context', 'none'])
     return parser.parse_args()
 
 if __name__ == "__main__":
+    torch.backends.cudnn.enabled=False
     args = get_args()
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model_name = args.model
+    tokenizer_name = args.tokenizer
 
-    dset = ViContextHSD('train')
-    tokenizer = WhitespaceTokenizer().build_from_texts(dset.df['comment'].tolist() + dset.df['caption'].tolist())
-    image_transformer = v2.Compose([
-        v2.ToDtype(torch.float32),
-        v2.Resize((224, 224)),
-        v2.Normalize(mean=[0]*3, std=[225]*3)
-    ])
+    # Load dataset
+    dset = ViContextHSD('train', 
+                        ablation=args.ablate,
+                        text_preprocessing=config.TEXT_DATA_PREPROCESSING,
+                        img_transform=config.IMAGE_DATA_TRANSFORMATION)
+    # Load tokenizer
+    tokenizer = import_module(f'.{tokenizer_name}', package='tokenizer').Tokenizer(dset.df.loc[:, ['caption', 'comment']].values.ravel())
 
-    model = import_module(f'models.{args.model}').Model(
-        ocab_size=len(tokenizer),
-        hidden_size=512
-    )
-    model.cuda()
+    # Load model
+    model = import_module(f'.{model_name}', package='models').Model(
+        ablation=args.ablate,
+        vocab_size=len(tokenizer),
+        **config.MODEL_HYPERPARAMS.get(model_name, dict()))
+    model.to(device)
+    model.train()
     summary(model)
 
-    samples = dset.df.sample(args.batch_size)
-    caption_input = tokenizer(samples['caption'])
-    comment_input = tokenizer(samples['comment'])
-    image_input = torch.stack([
-        image_transformer(read_image(dset.dir / 'imgs' / img_path))
-        for img_path in samples['image']
-    ])
-    input = {
-        'caption': caption_input['input_ids'].cuda(),
-        'image': image_input.cuda(),
-        'comment': comment_input['input_ids'].cuda(),
-        'caption_attention_mask': caption_input['attention_mask'].cuda(),
-        'comment_attention_mask': comment_input['attention_mask'].cuda(),
-    }
-    model.train().cuda()
-    out = model(**input)
+    optimizer = config.OPTIMIZER(model.parameters(),
+                                 **config.OPTIMIZER_HYPERPARAMS)
+    loss_fn = config.LOSS_FN(**config.LOSS_HYPERPARAMS)
 
-    print(out.size())
-    out.sum().backward()
+    # Test on batch
+    dloader = DataLoader(dset, batch_size=args.batch_size, collate_fn=collate_fn)
+    batch = next(iter(dloader))
+    batch = process_batch(batch, 
+                          tokenizer=tokenizer,
+                          device=device)
+    input, label = batch['input'], batch['label']
+    pred = model(**input)
 
-    allocated_memory, cached_memory = torch.cuda.mem_get_info()
-    print("Allocated memory:", allocated_memory / 1024**3, "GB")
-    print("Cached memory:", cached_memory / 1024**3, "GB")
+    # Test backward propagation
+    loss = loss_fn(pred, label)
+    loss.backward()
+    optimizer.step()
+
+    # Get memory info
+    if device.type == 'cuda':
+        allocated_memory, cached_memory = torch.cuda.mem_get_info()
+        print('Free memory:', allocated_memory / 1024**3, "GB")
+        print('Total memory:', cached_memory / 1024**3, "GB")

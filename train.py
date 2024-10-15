@@ -3,10 +3,9 @@ import torch.amp
 from torch.utils.data import DataLoader
 from torchsummary import summary
 import config
-from tokenizer import WhitespaceTokenizer
 from utils.data_loading import ViContextHSD, train_val_split, collate_fn
-from torchvision.transforms import v2
 from utils.evaluate import evaluate
+from utils.utils import process_batch
 from sklearn.utils import compute_class_weight
 
 from importlib import import_module
@@ -36,14 +35,12 @@ def train(
 ):
     dir_checkpoint = Path("./checkpoints/") / model_name
 
-    img_transform = config.IMAGE_DATA_TRANSFORMATION
-
     logging.info('Loading datasets...')
     dataset = ViContextHSD(
             part="train",
             ablation=ablate,
             text_preprocessing=config.TEXT_DATA_PREPROCESSING,
-            img_transform=img_transform)
+            img_transform=config.IMAGE_DATA_TRANSFORMATION)
     # Build train and dev sets
     split = train_val_split(dataset, val_percent=val_percent)
     train_set, val_set = split['train_set'], split['val_set']
@@ -52,10 +49,9 @@ def train(
     n_val = len(val_set)
 
     logging.info("Building tokenizer")
-    tokenizer = import_module(f'tokenizer.{tokenizer_name}').Tokenizer()
-    tokenizer.build_from_texts(train_set.dataset.df.loc[split['train_idx'], ['caption', 'comment']].values.ravel())
+    tokenizer = import_module(f'.{tokenizer_name}', package='tokenizer').Tokenizer(dataset.df.loc[split['train_idx'], ['caption', 'comment']].values.ravel())
 
-    model = import_module(f"models.{model_name}").Model(
+    model = import_module(f'.{model_name}', package='models').Model(
         ablation=ablate,
         vocab_size=len(tokenizer),
         **config.MODEL_HYPERPARAMS.get(model_name, dict()))
@@ -79,9 +75,9 @@ def train(
         Tokenizer:              {tokenizer_name}
         Ablation:               {ablate}
         Train size:             {n_train}
+        Validation size:        {n_val}
         Train uq. posts:        {dataset.df.loc[split['train_idx'], 'image'].nunique()} 
         Val uq. posts:          {dataset.df.loc[split['val_idx'], 'image'].nunique()} 
-        Validation size:        {n_val}
         Vocab size:             {len(tokenizer)}
         Epochs:                 {epochs}
         Batch size:             {batch_size}
@@ -107,19 +103,11 @@ def train(
         model.train()
         with tqdm(total=n_train, desc=f"Epoch {epoch}/{epochs}", unit="comment") as pbar:
             for i_batch, batch in enumerate(train_loader, start=1):
-                caption, image, comment, label = batch['caption'], batch['image'], batch['comment'], batch['label']
-
-                caption_input = tokenizer(caption) if caption is not None else None
-                comment_input = tokenizer(comment)
-
-                input = {
-                    'caption': caption_input['input_ids'].to(device) if caption is not None else None,
-                    'caption_attention_mask': caption_input['attention_mask'].to(device) if caption is not None else None,
-                    'image': image.to(device) if image is not None else None,
-                    'comment': comment_input['input_ids'].to(device),
-                    'comment_attention_mask': comment_input['attention_mask'].to(device),
-                }
-                label = label.to(device)
+                batch = process_batch(
+                    batch=batch,
+                    tokenizer=tokenizer,
+                    device=device)
+                input, label = batch['input'], batch['label']
 
                 with torch.autocast(device.type if device.type != 'mps' else 'cpu', enabled=amp):
                     logits = model(**input)
@@ -137,7 +125,7 @@ def train(
                     grad_scaler.update()
                     optimizer.zero_grad(set_to_none=True)
 
-                pbar.update(len(comment))
+                pbar.update(batch['n_samples'])
                 pbar.set_postfix(**{'loss (batch)': f"{loss.item():.4f}"})
 
         # Evaluation round
@@ -189,7 +177,7 @@ def get_args():
                         type=float, help='Gradient clipping', dest='grad_clip')
     parser.add_argument('--val-percent', '-val', metavar='VAL', default=0.1, 
                         type=float, help='Validation sampled from training set', dest='val_percent')
-    parser.add_argument('--weight-decay', '-w', metavar='WD', default=0, 
+    parser.add_argument('--weight-decay', '-wd', metavar='WD', default=0, 
                         type=float, help='Weight decay', dest='wd')
     parser.add_argument('--grad-accum', '-ga', metavar='GA', default=1, 
                         type=int, help='Number of gradient accumulation over batches', dest='grad_accum')
@@ -197,7 +185,7 @@ def get_args():
                         action='store_true', help='Use mixed precision')
     parser.add_argument('--cls-weight', '-cw', default=False,
                         action='store_true', help='Apply balanced class weight', dest='cls_weight')
-    parser.add_argument('--resume', default=None, 
+    parser.add_argument('--resume', default='none', 
                         help='Resume checkpointed model')
     return parser.parse_args()
 

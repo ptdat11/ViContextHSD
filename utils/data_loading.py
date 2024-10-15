@@ -2,12 +2,14 @@ import torch
 from torch.utils.data import Dataset, Subset
 from torchvision.io import read_image, ImageReadMode
 
+from tqdm import tqdm
 import re
 from sklearn.model_selection import StratifiedGroupKFold
 from pathlib import Path
 from pandas import DataFrame
 from json import load
 from typing import Literal
+
 
 def read_ViContextHSD(dir: str):
     dir = Path(dir)
@@ -46,8 +48,11 @@ class ViContextHSD(Dataset):
         self.label2idx = label2idx
 
         self.df = read_ViContextHSD(self.dir)
-        self.df['caption'] = self.df['caption'].map(text_preprocessing)
-        self.df['comment'] = self.df['comment'].map(text_preprocessing)
+        
+        tqdm.pandas(desc='Processing captions', total=len(self), unit='caption')
+        self.df['caption'] = self.df['caption'].progress_map(text_preprocessing)
+        tqdm.pandas(desc='Processing comment', total=len(self), unit='comment')
+        self.df['comment'] = self.df['comment'].progress_map(text_preprocessing)
         self.df['label'] = self.df['label'].map(label2idx)
 
     def __len__(self):
@@ -93,6 +98,7 @@ def collate_fn(samples: dict):
         'label': torch.tensor(labels)
     }
     return batch
+
 
 def train_val_split(
         dataset: ViContextHSD,

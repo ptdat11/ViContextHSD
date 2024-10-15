@@ -36,28 +36,31 @@ class BaseModel(nn.Module, ABC):
             caption=caption, caption_attention_mask=caption_attention_mask,
             image=image, 
             comment=comment, comment_attention_mask=comment_attention_mask)
-
+    
+    @property
+    def hyperparams(self):
+        raise NotImplementedError
 
     def forward_no_ablation(
             self,
             caption: torch.Tensor, caption_attention_mask: torch.Tensor,
             image: torch.Tensor,
             comment: torch.Tensor, comment_attention_mask: torch.Tensor) -> torch.Tensor:
-        pass
+        raise NotImplementedError
 
     def forward_caption_ablation(
             self,
             image: torch.Tensor,
             comment: torch.Tensor, comment_attention_mask: torch.Tensor) -> torch.Tensor:
-        pass
+        raise NotImplementedError
 
     def forward_image_ablation(
             self,
             caption: torch.Tensor, caption_attention_mask: torch.Tensor,
             comment: torch.Tensor, comment_attention_mask: torch.Tensor) -> torch.Tensor:
-        pass
+        raise NotImplementedError
 
     def forward_context_ablation(
             self,
             comment: torch.Tensor, comment_attention_mask: torch.Tensor) -> torch.Tensor:
-        pass
+        raise NotImplementedError
