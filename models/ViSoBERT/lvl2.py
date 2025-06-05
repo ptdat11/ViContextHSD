@@ -33,8 +33,10 @@ class ViSoBERT(Model):
                 out_features=self.comment_encoder.config.hidden_size
             )
         
-        if ablate != "context":
+        if ablate not in ["context", "post"]:
             self.gate = Gate(768, 768, 768, output_dim=768)
+        elif ablate == "post":
+            self.gate = Gate(768, 768, output_dim=768)
         
         self.classifier = nn.Linear(
             in_features=self.reply_encoder.config.hidden_size,

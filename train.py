@@ -1,9 +1,9 @@
-import mlflow.system_metrics
+# import mlflow.system_metrics
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
 from torchinfo import summary
 from peft import LoraConfig, get_peft_model
-import mlflow
+# import mlflow
 
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -20,6 +20,7 @@ from typing import Callable
 from importlib import import_module
 from pathlib import Path
 from sklearn.utils import compute_class_weight
+from pandas import DataFrame
 from PIL import Image
 
 from utils.logger import Logger
@@ -58,7 +59,7 @@ def train(
             label = batch.pop("label")
 
             _, loss = model(batch, label)
-            running_loss = 0.1*running_loss + 0.9*loss.item()
+            running_loss = 0.3*running_loss + 0.7*loss.item()
             del _, batch, label
             loss.backward()
 
@@ -105,7 +106,7 @@ def get_args():
     parser.add_argument("--target-cmt-lvl", "-lvl", default=1, type=int, help="Target speech level", choices=[1, 2], dest="level")
     parser.add_argument("--label-merge", "-merge", default="none", type=str_or_none, help="Target speech level", choices=["Toxic", "Acceptable", None], dest="merge")
     parser.add_argument("--early-stop-patience", default=5, type=int,  help="Number of consecutive epochs of no improvement before stop training", dest="patience")
-    parser.add_argument("--monitor", default="f1", help="Early stopping monitored metric", choices=["f1", "recall", "precision", "loss"])
+    parser.add_argument("--monitor", default="f1", help="Early stopping monitored metric", choices=["f1-score", "recall", "precision", "loss"])
     parser.add_argument("--batch-size", default="32", type=int, help="Batch size", dest="batch_size")
     parser.add_argument("--eval-batch-size", default="64", type=int, help="Evaluation batch size", dest="eval_batch_size")
     parser.add_argument("--learning-rate", "-lr", default=1e-3, type=float, help="Learning rate", dest="lr")
@@ -175,14 +176,6 @@ def main(rank, world_size, args):
         n_classes=n_classes,
         cls_weights=cls_weights
     )
-    if resume:
-        if os.path.exists(checkpoint_dir/"last_epoch.pth"):
-            model.load_state_dict(
-                torch.load(config.PWD/checkpoint_dir/"last_epoch.pth", weights_only=False, map_location="cpu")["state_dict"]
-            )
-            logger.info(f"Checkpoint {checkpoint_dir/'last_epoch.pth'} loaded")
-        else:
-            logger.warning(f"Checkpoint {checkpoint_dir/'last_epoch.pth'} not found, starting from scratch")
 
     model = get_peft_model(model, LoraConfig(r=lora_rank, lora_alpha=2*lora_rank, target_modules=config.LoRA_TARGET_LINEAR[model_name], exclude_modules=config.LoRA_EXCLUDE_LINEAR.get(model_name, None), **config.LoRA_KWARGS))
 
@@ -193,9 +186,18 @@ def main(rank, world_size, args):
         model = DDP(model, device_ids=[rank], find_unused_parameters=True)
 
     optimizer = config.OPTIMIZER(model.parameters(), lr=lr, weight_decay=wd, **config.OPTIMIZER_KWARGS)
-    early_stopper = EarlyStopper(patience, policy="min" if monitor == "loss" else "max")
+    early_stopper = EarlyStopper(patience, smoothing_alpha=0.8, policy="min" if monitor == "loss" else "max")
     save_best_model = lambda score: copyfile(checkpoint_dir/"last_epoch.pth", checkpoint_dir/"best_model.pth")
 
+    if resume:
+        if os.path.exists(checkpoint_dir/"last_epoch.pth"):
+            chkp = torch.load(config.PWD/checkpoint_dir/"last_epoch.pth", weights_only=False, map_location="cpu")
+            model.load_state_dict(chkp["state_dict"])
+            optimizer.load_state_dict(chkp["optimizer"])
+            logger.info(f"Checkpoint {checkpoint_dir/'last_epoch.pth'} loaded")
+        else:
+            logger.warning(f"Checkpoint {checkpoint_dir/'last_epoch.pth'} not found, starting from scratch")
+    
     logger.info(f"""
     Model: {model_name}
     Training size: {len(train_dset)}
@@ -218,85 +220,81 @@ def main(rank, world_size, args):
     dev_dataloader = DataLoader(dataset=dev_dset, shuffle=False, batch_size=eval_batch_size, sampler=dev_sampler, pin_memory=device.startswith("cuda"), **config.DATALOADER_KWARGS)
     process_batch_fn = getattr(import_module(f".{model_name}.process_batch", package="models"), "process_batch")
 
-    exp = mlflow.set_experiment("Target Speech: " + {1: "Comment", 2: "Reply"}[cmt_lvl])
-    with mlflow.start_run(experiment_id=exp.experiment_id, log_system_metrics=True) as run:
-        mlflow.set_tags({
-            "model": model_name,
-            "ablation": ablate,
-            "label-merge": lbl_merge
-        })
+    # exp = mlflow.set_experiment("Target Speech: " + {1: "Comment", 2: "Reply"}[cmt_lvl])
+    # with mlflow.start_run(experiment_id=exp.experiment_id, log_system_metrics=True) as run:
+    #     mlflow.set_tags({
+    #         "model": model_name,
+    #         "ablation": ablate,
+    #         "label-merge": lbl_merge
+    #     })
 
-        mlflow.log_params({
-            "patience": patience,
-            "batch-size": batch_size,
-            "lr": lr,
-            "grad-clip": grad_clip,
-            "grad-accumulation": grad_accum,
-            "lora_rank": lora_rank,
-            "enable-class-weight": enable_cls_weight
-        })
+    #     mlflow.log_params({
+    #         "patience": patience,
+    #         "batch-size": batch_size,
+    #         "lr": lr,
+    #         "grad-clip": grad_clip,
+    #         "grad-accumulation": grad_accum,
+    #         "lora_rank": lora_rank,
+    #         "enable-class-weight": enable_cls_weight
+    #     })
         
-        epoch = 1
-        while True:
-            model.to(device)
-            # Training round
-            train(model, train_dataloader, optimizer, process_batch_fn, grad_accum, grad_clip, use_aug, device)
+    epoch = 1
+    while True:
+        model.to(device)
+        # Training round
+        train(model, train_dataloader, optimizer, process_batch_fn, grad_accum, grad_clip, use_aug, device)
 
-            # Checkpointing
-            if rank == 0:
-                chkp_path = save_checkpoint({
-                    "epoch": epoch,
-                    "patience": early_stopper.waited,
-                    "state_dict": deepcopy(model.module.cpu()).merge_and_unload().state_dict(),
-                    "optimizer": optimizer.state_dict()
-                }, checkpoint_dir)
-                logger.info(f"Checkpoint saved at {chkp_path}")
+        # Checkpointing
+        if rank == 0:
+            chkp_path = save_checkpoint({
+                "epoch": epoch,
+                "patience": early_stopper.waited,
+                "state_dict": deepcopy(model.module.cpu()).merge_and_unload().state_dict(),
+                "optimizer": optimizer.state_dict()
+            }, checkpoint_dir)
+            logger.info(f"Checkpoint saved at {chkp_path}")
 
-            # Evaluation round
-            process_dev_output = infer(model, dev_dataloader, process_batch_fn, device)
+        # Evaluation round
+        process_dev_output = infer(model, dev_dataloader, process_batch_fn, device)
 
-            predictions = [None for _ in range(world_size)]
-            ground_truths = predictions.copy()
-            dist.all_gather_object(predictions, process_dev_output["predictions"])
-            dist.all_gather_object(ground_truths, process_dev_output["ground_truths"])
+        predictions = [None for _ in range(world_size)]
+        ground_truths = predictions.copy()
+        dist.all_gather_object(predictions, process_dev_output["predictions"])
+        dist.all_gather_object(ground_truths, process_dev_output["ground_truths"])
 
-            if rank == 0:
-                predictions = {cmt_id: pred for d in predictions for cmt_id, pred in d.items()}
-                ground_truths = {cmt_id: pred for d in ground_truths for cmt_id, pred in d.items()}
+        if rank == 0:
+            predictions = {cmt_id: pred for d in predictions for cmt_id, pred in d.items()}
+            ground_truths = {cmt_id: pred for d in ground_truths for cmt_id, pred in d.items()}
 
-                scores = make_report(
-                    predictions=predictions,
-                    ground_truths=ground_truths,
-                    idx2label=train_dset.idx2label
-                )
-                logger.info(f"Evaluation score:\n{scores['score_by_class']}")
+            scores = make_report(
+                predictions=predictions,
+                ground_truths=ground_truths,
+                idx2label=train_dset.idx2label,
+                logger=logger,
+                output_dict=True
+            )
+            logger.info(f"Evaluation score:\n{DataFrame(scores)}")
 
-                mlflow.log_metrics({
-                    "Ma-F1": scores["f1"],
-                    "Ma-Recall": scores["recall"],
-                    "Ma-Rrecision": scores["precision"]
-                    # "Loss": scores["loss"]
-                }, step=epoch)
-
-                score = scores[monitor]
-            else:
-                score = None
-            
-            score_holder = [score]
-            dist.broadcast_object_list(score_holder, src=0)
-            score = score_holder[0]
-            
-            # Early stopping
-            if early_stopper(score, on_improvement=save_best_model):
-                logger.info("Early stopping")
-                break
-
-            logger.info("============================================")
-            epoch += 1
-            # break
+            score = scores["macro avg"][monitor]
+        else:
+            score = None
         
-        if args.dist:
-            dist.destroy_process_group()
+        score_holder = [score]
+        dist.broadcast_object_list(score_holder, src=0)
+        score = score_holder[0]
+        
+        # Early stopping
+        if early_stopper(score, on_improvement=save_best_model):
+            logger.info("Early stopping")
+            break
+
+        if rank == 0:
+            print("============================================")
+        epoch += 1
+        # break
+    
+    if args.dist:
+        dist.destroy_process_group()
 
     logger.info("Training completed")
 

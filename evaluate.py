@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.multiprocessing as mp
-from sklearn.metrics import f1_score, recall_score, precision_score
+from sklearn.metrics import classification_report
 
 from utils.dataset import ViContextHSD
 from utils.logger import Logger
@@ -28,7 +28,6 @@ def infer(
     process_batch_fn: Callable,
     device: str,
 ):
-    num_classes = 2 if dataloader.dataset.label_merge else 3
     predictions = {}
     ground_truths = {}
 
@@ -50,21 +49,7 @@ def infer(
             running_loss += loss.item()
             pbar.update()
 
-    truths = list(ground_truths.values())
-    preds = list(predictions.values())
-    f1 = f1_score(truths, preds, average=None, labels=range(num_classes))
-    recall = recall_score(truths, preds, average=None, labels=range(num_classes))
-    precision = precision_score(truths, preds, average=None, labels=range(num_classes))
-
     loss = running_loss / n_batches
-    score_by_class = DataFrame({
-        "F1": f1,
-        "Recall": recall,
-        "Precision": precision,
-    }).transpose()
-    score_by_class.rename(columns=dataloader.dataset.idx2label, inplace=True)
-    score_by_class["Macro-avg"] = score_by_class.mean(axis=1)
-    
     return {
         "predictions": predictions,
         "ground_truths": ground_truths
@@ -80,13 +65,12 @@ def suppress_logger_on_non_zero_ranks(logger, rank):
     if rank != 0:
         logger.setLevel(logging.CRITICAL + 1)  # Effectively silences all logs
 
-
-def evaluate(
+def make_report(
     predictions: dict,
     ground_truths: dict,
-    metric: Callable,
+    idx2label: dict | None = None,
     logger: Logger | None = None,
-    **metric_kwargs
+    output_dict: bool = False
 ):
     df = concat([
         Series(predictions),
@@ -96,35 +80,11 @@ def evaluate(
     df.dropna(inplace=True)
     if n_prev > df.shape[0] and logger:
         logger.warning(f"Dropped {n_prev-df.shape[0]} NaN predictions.")
-    return metric(df.loc[:, 1], df.loc[:, 0], **metric_kwargs)
 
-
-def make_report(
-    predictions: dict,
-    ground_truths: dict,
-    idx2label: dict | None = None,
-    logger: Logger | None = None,
-):
-    labels = range(Series(ground_truths).nunique())
-    f1 = evaluate(predictions, ground_truths, f1_score, logger, average=None, labels=labels)
-    recall = evaluate(predictions, ground_truths, recall_score, logger, average=None, labels=labels)
-    precision = evaluate(predictions, ground_truths, precision_score, logger, average=None, labels=labels)
-
-    score_by_class = DataFrame({
-        "F1": f1,
-        "Recall": recall,
-        "Precision": precision,
-    }).transpose()
-    if idx2label:
-        score_by_class.rename(columns=idx2label, inplace=True)
-    score_by_class["Macro-avg"] = score_by_class.mean(axis=1)
-    
-    return {
-        "f1": f1.mean(),
-        "recall": recall.mean(),
-        "precision": precision.mean(),
-        "score_by_class": score_by_class
-    }
+    y_true = df.loc[:, 1].values
+    y_pred = df.loc[:, 0].values
+    report = classification_report(y_true, y_pred, labels=list(idx2label.keys()), target_names=list(idx2label.values()), output_dict=output_dict, digits=4)
+    return report
 
 
 def logits_to_class(logits: torch.Tensor):
@@ -149,7 +109,7 @@ def main(rank, world_size, args):
 
 
     pred_path = Path(f"predictions/{model_name}/ablate_{ablate}--lvl_{cmt_lvl}--merge_{lbl_merge}.json")
-    if os.path.exists(pred_path):
+    if os.path.exists(pred_path) and not save_preds:
         if rank == 0:
             with open(pred_path, "r") as f:
                 predictions = json.load(f)
@@ -201,7 +161,7 @@ def main(rank, world_size, args):
             if save_preds:
                 os.makedirs(f"predictions/{model_name}", exist_ok=True)
                 with open(pred_path, "w+") as f:
-                    json.dump("predictions", f, ensure_ascii=False, indent=2)
+                    json.dump(predictions, f, ensure_ascii=False, indent=2)
                 logger.info(f"Predictions are saved at {pred_path}")
     
     if rank == 0:
@@ -211,7 +171,7 @@ def main(rank, world_size, args):
             idx2label=test_dset.idx2label,
             logger=logger
         )
-        logger.info(f"Evaluation score:\n{scores['score_by_class']}")
+        logger.info(f"Evaluation score:\n{scores}")
     
     if args.dist and dist.is_initialized():
         dist.destroy_process_group()

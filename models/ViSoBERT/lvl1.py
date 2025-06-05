@@ -3,11 +3,10 @@ from torch import nn
 
 from copy import deepcopy
 from transformers import AutoModel, ViTModel
-from transformers.modeling_attn_mask_utils import _prepare_4d_attention_mask_for_sdpa, _prepare_4d_causal_attention_mask_for_sdpa
-from transformers.modeling_outputs import BaseModelOutputWithPoolingAndCrossAttentions
-from typing import Literal, Optional, Tuple, Union, List
+from typing import Literal
 from ..base import Model
 from utils.gating import Gate
+
 
 class ViSoBERT(Model):
     def __init__(
@@ -28,7 +27,7 @@ class ViSoBERT(Model):
             self.image_mlp = nn.Linear(
                 in_features=self.image_encoder.config.hidden_size,
                 out_features=self.comment_encoder.config.hidden_size
-            )            
+            )
         
         if ablate != "context":
             self.gate = Gate(768, 768, output_dim=768)
@@ -48,17 +47,15 @@ class ViSoBERT(Model):
     def forward_ablate_caption(self, image, comment):
         image_embed = self.image_encoder(**image).last_hidden_state[..., 0, :]
         image_embed = self.image_mlp(image_embed)
-
         comment_embed = self.comment_encoder(**comment).last_hidden_state[..., 0, :]
-        comment_embed += image_embed
+        comment_embed = self.gate(comment_embed, image_embed)
         logits = self.classifier(comment_embed)
         return logits
     
     def forward_ablate_image(self, caption, comment):
         caption_embed = self.caption_encoder(**caption).last_hidden_state[..., 0, :]
-
         comment_embed = self.comment_encoder(**comment).last_hidden_state[..., 0, :]
-        comment_embed += caption_embed
+        comment_embed = self.gate(comment_embed, caption_embed)
         logits = self.classifier(comment_embed)
         return logits
 

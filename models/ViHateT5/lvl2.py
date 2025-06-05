@@ -32,8 +32,10 @@ class ViHateT5(Model):
                 out_features=self.reply_encoder.config.d_model
             )
 
-        if ablate != "context":
+        if ablate not in ["context", "post"]:
             self.gate = Gate(768, 768, 768, output_dim=768)
+        elif ablate == "post":
+            self.gate = Gate(768, 768, output_dim=768)
         
         self.classifier = nn.Linear(
             in_features=self.reply_encoder.config.d_model,
@@ -51,10 +53,9 @@ class ViHateT5(Model):
     def forward_ablate_caption(self, image, comment, reply):
         image_embed = self.image_encoder(**image).last_hidden_state[..., 0, :]
         image_embed = self.image_mlp(image_embed)
-
         comment_embed = self.comment_encoder(**comment).last_hidden_state.mean(dim=-2)
         reply_embed = self.reply_encoder(**reply).last_hidden_state.mean(dim=-2)
-        reply_embed += image_embed + comment_embed
+        reply_embed = self.gate(reply_embed, comment_embed, image_embed)
 
         logits = self.classifier(reply_embed)
         return logits
@@ -63,19 +64,19 @@ class ViHateT5(Model):
         caption_embed = self.caption_encoder(**caption).last_hidden_state.mean(dim=-2)
         comment_embed = self.comment_encoder(**comment).last_hidden_state.mean(dim=-2)
         reply_embed = self.reply_encoder(**reply).last_hidden_state.mean(dim=-2)
-        reply_embed += caption_embed + comment_embed
+        reply_embed = self.gate(reply_embed, comment_embed, caption_embed)
         logits = self.classifier(reply_embed)
         return logits
 
     def forward_ablate_post(self, comment, reply):
         comment_embed = self.comment_encoder(**comment).last_hidden_state.mean(dim=-2)
         reply_embed = self.reply_encoder(**reply).last_hidden_state.mean(dim=-2)
-        reply_embed += comment_embed
+        reply_embed = self.gate(reply_embed, comment_embed)
         logits = self.classifier(reply_embed)
         return logits
 
     def forward_ablate_context(self, reply):
-        reply_embed = self.comment_encoder(**reply).last_hidden_state.mean(dim=-2)
+        reply_embed = self.reply_encoder(**reply).last_hidden_state.mean(dim=-2)
         logits = self.classifier(reply_embed)
         return logits
     

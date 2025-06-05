@@ -35,7 +35,7 @@ class Gate(nn.Module):
         if self.n_components == 2:
             z = F.sigmoid(self.gating_weight(cat))
             z = torch.stack([z, 1 - z], dim=1)
-        elif self.n_modals >= 3:
+        elif self.n_components >= 3:
             z = torch.stack([weight(cat) for weight in self.gating_weights], dim=1)
             z = F.softmax(z, dim=1)
 
